@@ -3,11 +3,11 @@ RecommenDNN leverages deep neural networks to model complex user–item interact
 
 We provide three models:
 
-GMF (Generalized Matrix Factorization): captures linear user–item interactions.
+- GMF (Generalized Matrix Factorization): captures linear user–item interactions.
 
-MLP (Multi-Layer Perceptron): models nonlinear user–item relationships with deep layers.
+- MLP (Multi-Layer Perceptron): models nonlinear user–item relationships with deep layers.
 
-NeuMF (Neural Matrix Factorization): a hybrid model that combines GMF and MLP for improved performance.
+- NeuMF (Neural Matrix Factorization): a hybrid model that combines GMF and MLP for improved performance.
 
 The models are trained and evaluated on implicit feedback datasets (MovieLens 1M and Pinterest-20) using a leave-one-out protocol, and performance is measured with Hit Ratio (HR) and NDCG at Top-K.
 
