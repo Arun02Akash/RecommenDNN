@@ -1,24 +1,27 @@
-FROM ubuntu:16.04
+# Base image
+FROM python:3.6-slim   # slim Python base instead of full Ubuntu 16.04
 
-ENV KERAS_BACKEND theano
+# Set environment variables
+ENV KERAS_BACKEND=theano \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
-RUN mkdir -p /tmp/setup && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         git \
-        python-dev \
-        python-pip \
-        python-setuptools \
-        software-properties-common \
         wget \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --upgrade --user pip==9.0.3 && \
-    pip install Theano==0.8.0 && \
-    pip install keras==1.0.7 && \
-    pip install h5py && \
-    pip install numpy==1.11.0
+# Install Python dependencies (exact versions for reproducibility)
+RUN pip install --no-cache-dir \
+        numpy==1.11.0 \
+        h5py \
+        Theano==0.8.0 \
+        keras==1.0.7
 
+# Create working directory
 WORKDIR /home
+
+# Default command
 CMD ["/bin/bash"]
