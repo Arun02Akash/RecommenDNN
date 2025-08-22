@@ -1,171 +1,166 @@
-'''
-Created on Aug 9, 2016
-
-Keras Implementation of Generalized Matrix Factorization (GMF) recommender model in:
-He Xiangnan et al. Neural Collaborative Filtering. In WWW 2017.  
-
-@author: Xiangnan He (xiangnanhe@gmail.com)
-'''
 import numpy as np
-import theano.tensor as T
-import keras
-from keras import backend as K
-from keras import initializations
-from keras.models import Sequential, Model, load_model, save_model
-from keras.layers.core import Dense, Lambda, Activation
-from keras.layers import Embedding, Input, Dense, merge, Reshape, Merge, Flatten
-from keras.optimizers import Adagrad, Adam, SGD, RMSprop
-from keras.regularizers import l2
+import argparse
+import multiprocessing as mp
+from time import time
+
+from tensorflow.keras import Model, Input
+from tensorflow.keras.layers import Embedding, Flatten, Multiply, Dense
+from tensorflow.keras.optimizers import Adagrad, Adam, SGD, RMSprop
+from tensorflow.keras.regularizers import l2
+
 from Dataset import Dataset
 from evaluate import evaluate_model
-from time import time
-import multiprocessing as mp
-import sys
-import math
-import argparse
+
 
 #################### Arguments ####################
 def parse_args():
     parser = argparse.ArgumentParser(description="Run GMF.")
-    parser.add_argument('--path', nargs='?', default='Data/',
+    parser.add_argument('--path', type=str, default='Data/',
                         help='Input data path.')
-    parser.add_argument('--dataset', nargs='?', default='ml-1m',
-                        help='Choose a dataset.')
+    parser.add_argument('--dataset', type=str, default='ml-1m',
+                        help='Dataset name.')
     parser.add_argument('--epochs', type=int, default=100,
-                        help='Number of epochs.')
+                        help='Number of training epochs.')
     parser.add_argument('--batch_size', type=int, default=256,
                         help='Batch size.')
     parser.add_argument('--num_factors', type=int, default=8,
                         help='Embedding size.')
-    parser.add_argument('--regs', nargs='?', default='[0,0]',
+    parser.add_argument('--regs', type=str, default='[0,0]',
                         help="Regularization for user and item embeddings.")
     parser.add_argument('--num_neg', type=int, default=4,
-                        help='Number of negative instances to pair with a positive instance.')
+                        help='Number of negative samples per positive instance.')
     parser.add_argument('--lr', type=float, default=0.001,
                         help='Learning rate.')
-    parser.add_argument('--learner', nargs='?', default='adam',
-                        help='Specify an optimizer: adagrad, adam, rmsprop, sgd')
+    parser.add_argument('--learner', type=str, default='adam',
+                        help='Optimizer: adagrad, adam, rmsprop, sgd')
     parser.add_argument('--verbose', type=int, default=1,
-                        help='Show performance per X iterations')
+                        help='Show performance every X epochs.')
     parser.add_argument('--out', type=int, default=1,
-                        help='Whether to save the trained model.')
+                        help='Save the trained model.')
     return parser.parse_args()
 
-def init_normal(shape, name=None):
-    return initializations.normal(shape, scale=0.01, name=name)
 
-def get_model(num_users, num_items, latent_dim, regs=[0,0]):
-    # Input variables
-    user_input = Input(shape=(1,), dtype='int32', name = 'user_input')
-    item_input = Input(shape=(1,), dtype='int32', name = 'item_input')
+#################### Model ####################
+def get_model(num_users: int, num_items: int, latent_dim: int, regs=[0, 0]) -> Model:
+    """
+    Build the GMF model.
+    """
+    # Inputs
+    user_input = Input(shape=(1,), dtype='int32', name='user_input')
+    item_input = Input(shape=(1,), dtype='int32', name='item_input')
 
-    MF_Embedding_User = Embedding(input_dim = num_users, output_dim = latent_dim, name = 'user_embedding',
-                                  init = init_normal, W_regularizer = l2(regs[0]), input_length=1)
-    MF_Embedding_Item = Embedding(input_dim = num_items, output_dim = latent_dim, name = 'item_embedding',
-                                  init = init_normal, W_regularizer = l2(regs[1]), input_length=1)   
-    
-    # Crucial to flatten an embedding vector!
-    user_latent = Flatten()(MF_Embedding_User(user_input))
-    item_latent = Flatten()(MF_Embedding_Item(item_input))
-    
-    # Element-wise product of user and item embeddings 
-    predict_vector = merge([user_latent, item_latent], mode = 'mul')
-    
-    # Final prediction layer
-    #prediction = Lambda(lambda x: K.sigmoid(K.sum(x)), output_shape=(1,))(predict_vector)
-    prediction = Dense(1, activation='sigmoid', init='lecun_uniform', name = 'prediction')(predict_vector)
-    
-    model = Model(input=[user_input, item_input], 
-                output=prediction)
+    # Embeddings
+    user_embedding = Embedding(
+        input_dim=num_users, output_dim=latent_dim,
+        name='user_embedding',
+        embeddings_initializer="random_normal",
+        embeddings_regularizer=l2(regs[0])
+    )(user_input)
 
-    return model
+    item_embedding = Embedding(
+        input_dim=num_items, output_dim=latent_dim,
+        name='item_embedding',
+        embeddings_initializer="random_normal",
+        embeddings_regularizer=l2(regs[1])
+    )(item_input)
 
-def get_train_instances(train, num_negatives):
-    user_input, item_input, labels = [],[],[]
-    num_users = train.shape[0]
+    # Flatten
+    user_latent = Flatten()(user_embedding)
+    item_latent = Flatten()(item_embedding)
+
+    # Element-wise product
+    predict_vector = Multiply()([user_latent, item_latent])
+
+    # Output
+    prediction = Dense(1, activation='sigmoid', name='prediction')(predict_vector)
+
+    return Model(inputs=[user_input, item_input], outputs=prediction)
+
+
+#################### Training Instances ####################
+def get_train_instances(train, num_negatives: int, num_items: int):
+    """
+    Generate positive and negative training instances.
+    """
+    user_input, item_input, labels = [], [], []
     for (u, i) in train.keys():
         # positive instance
         user_input.append(u)
         item_input.append(i)
         labels.append(1)
         # negative instances
-        for t in xrange(num_negatives):
+        for _ in range(num_negatives):
             j = np.random.randint(num_items)
-            while train.has_key((u, j)):
+            while (u, j) in train:
                 j = np.random.randint(num_items)
             user_input.append(u)
             item_input.append(j)
             labels.append(0)
-    return user_input, item_input, labels
+    return np.array(user_input), np.array(item_input), np.array(labels)
 
+
+#################### Main ####################
 if __name__ == '__main__':
     args = parse_args()
-    num_factors = args.num_factors
     regs = eval(args.regs)
-    num_negatives = args.num_neg
-    learner = args.learner
-    learning_rate = args.lr
-    epochs = args.epochs
-    batch_size = args.batch_size
-    verbose = args.verbose
-    
+
     topK = 10
-    evaluation_threads = 1 #mp.cpu_count()
-    print("GMF arguments: %s" %(args))
-    model_out_file = 'Pretrain/%s_GMF_%d_%d.h5' %(args.dataset, num_factors, time())
-    
-    # Loading data
+    evaluation_threads = mp.cpu_count()
+
+    print("GMF arguments:", args)
+    model_out_file = f'Pretrain/{args.dataset}_GMF_{args.num_factors}_{int(time())}.h5'
+
+    # Load data
     t1 = time()
     dataset = Dataset(args.path + args.dataset)
-    train, testRatings, testNegatives = dataset.trainMatrix, dataset.testRatings, dataset.testNegatives
+    train, testRatings, testNegatives = dataset.train_matrix, dataset.test_ratings, dataset.test_negatives
     num_users, num_items = train.shape
-    print("Load data done [%.1f s]. #user=%d, #item=%d, #train=%d, #test=%d" 
-          %(time()-t1, num_users, num_items, train.nnz, len(testRatings)))
-    
+    print(f"Load data done [{time()-t1:.1f} s]. "
+          f"#user={num_users}, #item={num_items}, #train={train.nnz}, #test={len(testRatings)}")
+
     # Build model
-    model = get_model(num_users, num_items, num_factors, regs)
-    if learner.lower() == "adagrad": 
-        model.compile(optimizer=Adagrad(lr=learning_rate), loss='binary_crossentropy')
-    elif learner.lower() == "rmsprop":
-        model.compile(optimizer=RMSprop(lr=learning_rate), loss='binary_crossentropy')
-    elif learner.lower() == "adam":
-        model.compile(optimizer=Adam(lr=learning_rate), loss='binary_crossentropy')
-    else:
-        model.compile(optimizer=SGD(lr=learning_rate), loss='binary_crossentropy')
-    #print(model.summary())
-    
+    model = get_model(num_users, num_items, args.num_factors, regs)
+
+    # Compile
+    optimizer_dict = {
+        "adagrad": Adagrad(learning_rate=args.lr),
+        "rmsprop": RMSprop(learning_rate=args.lr),
+        "adam": Adam(learning_rate=args.lr),
+        "sgd": SGD(learning_rate=args.lr)
+    }
+    model.compile(optimizer=optimizer_dict.get(args.learner.lower(), Adam(args.lr)),
+                  loss='binary_crossentropy')
+
     # Init performance
     t1 = time()
-    (hits, ndcgs) = evaluate_model(model, testRatings, testNegatives, topK, evaluation_threads)
-    hr, ndcg = np.array(hits).mean(), np.array(ndcgs).mean()
-    #mf_embedding_norm = np.linalg.norm(model.get_layer('user_embedding').get_weights())+np.linalg.norm(model.get_layer('item_embedding').get_weights())
-    #p_norm = np.linalg.norm(model.get_layer('prediction').get_weights()[0])
-    print('Init: HR = %.4f, NDCG = %.4f\t [%.1f s]' % (hr, ndcg, time()-t1))
-    
-    # Train model
+    hits, ndcgs = evaluate_model(model, testRatings, testNegatives, topK, evaluation_threads)
+    hr, ndcg = np.mean(hits), np.mean(ndcgs)
+    print(f'Init: HR = {hr:.4f}, NDCG = {ndcg:.4f}\t [{time()-t1:.1f} s]')
+
+    # Train
     best_hr, best_ndcg, best_iter = hr, ndcg, -1
-    for epoch in xrange(epochs):
+    for epoch in range(args.epochs):
         t1 = time()
-        # Generate training instances
-        user_input, item_input, labels = get_train_instances(train, num_negatives)
-        
+        user_input, item_input, labels = get_train_instances(train, args.num_neg, num_items)
+
         # Training
-        hist = model.fit([np.array(user_input), np.array(item_input)], #input
-                         np.array(labels), # labels 
-                         batch_size=batch_size, nb_epoch=1, verbose=0, shuffle=True)
-        t2 = time()
-        
+        history = model.fit(
+            [user_input, item_input], labels,
+            batch_size=args.batch_size, epochs=1, verbose=0, shuffle=True
+        )
+
         # Evaluation
-        if epoch %verbose == 0:
-            (hits, ndcgs) = evaluate_model(model, testRatings, testNegatives, topK, evaluation_threads)
-            hr, ndcg, loss = np.array(hits).mean(), np.array(ndcgs).mean(), hist.history['loss'][0]
-            print('Iteration %d [%.1f s]: HR = %.4f, NDCG = %.4f, loss = %.4f [%.1f s]' 
-                  % (epoch,  t2-t1, hr, ndcg, loss, time()-t2))
+        if epoch % args.verbose == 0:
+            hits, ndcgs = evaluate_model(model, testRatings, testNegatives, topK, evaluation_threads)
+            hr, ndcg, loss = np.mean(hits), np.mean(ndcgs), history.history['loss'][0]
+            print(f'Iteration {epoch} [{time()-t1:.1f} s]: '
+                  f'HR = {hr:.4f}, NDCG = {ndcg:.4f}, loss = {loss:.4f}')
+
             if hr > best_hr:
                 best_hr, best_ndcg, best_iter = hr, ndcg, epoch
                 if args.out > 0:
-                    model.save_weights(model_out_file, overwrite=True)
+                    model.save_weights(model_out_file)
 
-    print("End. Best Iteration %d:  HR = %.4f, NDCG = %.4f. " %(best_iter, best_hr, best_ndcg))
+    print(f"End. Best Iteration {best_iter}: HR = {best_hr:.4f}, NDCG = {best_ndcg:.4f}.")
     if args.out > 0:
-        print("The best GMF model is saved to %s" %(model_out_file))
+        print(f"The best GMF model is saved to {model_out_file}")
